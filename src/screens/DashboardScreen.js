@@ -3,6 +3,7 @@ import { View, Text, StyleSheet, ActivityIndicator, Alert, Button, Modal, TextIn
 import WebView from 'react-native-webview';
 import * as Keychain from 'react-native-keychain';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import CookieManager from '@react-native-cookies/cookies';
 import DateTimePicker from '@react-native-community/datetimepicker';
 import notifee, { AuthorizationStatus, TimestampTrigger, TriggerType } from '@notifee/react-native';
 import { parseDeadlineString } from '../utils/parser';
@@ -12,6 +13,8 @@ import BootSplash from "react-native-bootsplash";
 
 const DEFAULT_HEADER = "*🚨 UPCOMING DEADLINES:*";
 const DEFAULT_ITEM = "*[{subject}]* _{desc}_\n⏳ *Due:* {date}\n⏱️ *Left:* {left}";
+const STORAGE_CUSTOM_DEADLINES = '@custom_deadlines';
+const STORAGE_CACHED_FEELS = '@cached_feels_deadlines';
 
 const parseSafeDate = (dateString) => {
   let targetDate = new Date(dateString);
@@ -30,6 +33,23 @@ const parseSafeDate = (dateString) => {
     }
   }
   return targetDate;
+};
+
+const normalizeCustomDeadlines = (items) => {
+  if (!Array.isArray(items)) return [];
+  return items.map((item) => ({
+    ...item,
+    id: item.id || `${item.subject || ''}-${item.deadline || ''}`,
+    source: 'custom',
+  }));
+};
+
+const normalizeFeelsDeadlines = (items) => {
+  if (!Array.isArray(items)) return [];
+  return items.map((item) => ({
+    ...item,
+    source: 'feels',
+  }));
 };
 
 const getUrgencyStyle = (deadlineStr) => {
@@ -79,21 +99,32 @@ const DashboardScreen = ({ onLogout }) => {
 
   useEffect(() => {
     const loadData = async () => {
+      // (Keep your existing Keychain and notification permission code here)
       await notifee.requestPermission();
       const creds = await Keychain.getGenericPassword();
       if (creds) { setCredentials(creds); setStatus('Connecting to FEeLS...'); } else { onLogout(); }
       
-      const savedHeader = await AsyncStorage.getItem('@header_template');
-      const savedItem = await AsyncStorage.getItem('@item_template');
-      const savedOffset = await AsyncStorage.getItem('@reminder_offset');
-      const savedNotes = await AsyncStorage.getItem('@saved_notes'); // ✨ LOAD NOTES
-      const savedDivider = await AsyncStorage.getItem('@divider_template');
-      
-      if (savedHeader) setHeaderTemplate(savedHeader);
-      if (savedItem) setItemTemplate(savedItem);
-      if (savedOffset) setReminderOffset(savedOffset);
-      if (savedNotes) setNotes(JSON.parse(savedNotes));
+      // ... (Keep your other AsyncStorage template getters here) ...
 
+      // ✨ Load cached deadlines so the list isn't blank during sync ✨
+      try {
+        const [savedCustomStr, cachedFeelsStr] = await Promise.all([
+          AsyncStorage.getItem(STORAGE_CUSTOM_DEADLINES),
+          AsyncStorage.getItem(STORAGE_CACHED_FEELS),
+        ]);
+
+        const customDeadlines = normalizeCustomDeadlines(savedCustomStr ? JSON.parse(savedCustomStr) : []);
+        const cachedFeels = normalizeFeelsDeadlines(cachedFeelsStr ? JSON.parse(cachedFeelsStr) : []);
+        const combined = [...cachedFeels, ...customDeadlines];
+
+        if (combined.length > 0) {
+          combined.sort((a, b) => parseSafeDate(a.deadline) - parseSafeDate(b.deadline));
+          setDeadlines(combined);
+        }
+      } catch (e) {
+        console.error("Failed to load cached deadlines on boot", e);
+      }
+      
     };
     loadData();
   }, []);
@@ -106,6 +137,19 @@ const DashboardScreen = ({ onLogout }) => {
     setShowSettings(false);
     Alert.alert("Saved!", "Your settings have been saved.");
     setShowSettings(false);
+  };
+
+  const handleLogout = async () => {
+    try {
+      await CookieManager.clearAll(true);
+      if (webviewRef.current?.clearCache) {
+        webviewRef.current.clearCache(true);
+      }
+    } catch (error) {
+      console.warn('Failed to clear FEeLS cookies', error);
+    }
+
+    onLogout();
   };
 
   // ✨ NEW: Notes Logic ✨
@@ -178,6 +222,9 @@ const DashboardScreen = ({ onLogout }) => {
     cancelAlarm(itemToDelete.subject, itemToDelete.deadline).catch(e => {});
     setLastDeleted({ item: itemToDelete, index: indexToRemove });
     setDeadlines(prev => prev.filter((_, index) => index !== indexToRemove));
+    if (itemToDelete?.source === 'custom') {
+      removeCustomDeadline(itemToDelete.id);
+    }
   };
 
   const handleUndo = () => {
@@ -188,6 +235,9 @@ const DashboardScreen = ({ onLogout }) => {
         return newList;
       });
       scheduleDeadlineReminder(lastDeleted.item.subject, lastDeleted.item.description, lastDeleted.item.deadline);
+      if (lastDeleted.item?.source === 'custom') {
+        upsertCustomDeadline({ ...lastDeleted.item, source: 'custom' });
+      }
       setLastDeleted(null);
     }
   };
@@ -229,13 +279,24 @@ const DashboardScreen = ({ onLogout }) => {
     const diffMs = customDate - new Date();
     let remaining = diffMs < 0 ? "Overdue 🚨" : `${Math.floor(diffMs / (1000 * 60 * 60 * 24))} days ${Math.floor((diffMs % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60))} hours`;
     const deadlineStr = `${getFormattedDateString(customDate)} ${getFormattedTimeString(customDate)}`;
-    const updatedItem = { subject: newSubject.toUpperCase(), description: newDesc, deadline: deadlineStr, remaining: remaining };
+    const existingItem = editingIndex !== null ? deadlines[editingIndex] : null;
+    const updatedItem = {
+      subject: newSubject.toUpperCase(),
+      description: newDesc,
+      deadline: deadlineStr,
+      remaining: remaining,
+      id: existingItem?.id || `${newSubject.toUpperCase()}-${deadlineStr}`,
+      source: existingItem?.source || 'custom',
+    };
 
     if (editingIndex !== null) {
         const oldItem = deadlines[editingIndex];
         await cancelAlarm(oldItem.subject, oldItem.deadline);
         setDeadlines(prev => { const newList = [...prev]; newList[editingIndex] = updatedItem; return newList; });
         scheduleDeadlineReminder(updatedItem.subject, updatedItem.description, updatedItem.deadline);
+        if (oldItem?.source === 'custom') {
+          await upsertCustomDeadline({ ...updatedItem, source: 'custom' });
+        }
     } else {
         setDeadlines(prev => {
           const newList = [...prev, updatedItem];
@@ -243,6 +304,7 @@ const DashboardScreen = ({ onLogout }) => {
           return newList;
         });
         scheduleDeadlineReminder(updatedItem.subject, updatedItem.description, updatedItem.deadline);
+        await upsertCustomDeadline({ ...updatedItem, source: 'custom' });
     }
     setShowAddModal(false); setNewSubject(''); setNewDesc(''); setCustomDate(new Date()); setEditingIndex(null); 
   };
@@ -251,44 +313,63 @@ const DashboardScreen = ({ onLogout }) => {
 
   const onRefresh = useCallback(() => { setRefreshing(true); setStatus('Refreshing FEeLS data...'); if (webviewRef.current) webviewRef.current.reload(); }, []);
 
-  const handleMessage = (event) => {
+  // ✨ NEW: Notice we added the 'async' keyword here! ✨
+  const handleMessage = async (event) => {
     try {
       const parsed = JSON.parse(event.nativeEvent.data);
       if (parsed.type === 'SCRAPED_DATA') {
-        const rawArray = parsed.data;
+        
+        // 1. ✨ FETCH CUSTOM DEADLINES FROM STORAGE FIRST ✨
+        const savedCustomStr = await AsyncStorage.getItem(STORAGE_CUSTOM_DEADLINES);
+        const customDeadlines = normalizeCustomDeadlines(savedCustomStr ? JSON.parse(savedCustomStr) : []);
+        
+        const rawArray = parsed.data || [];
+        let structuredData = [];
+
+        // 2. Process FEeLS data if there is any
         if (rawArray.length > 0) {
-          const structuredData = rawArray
+          structuredData = rawArray
             .map(item => parseDeadlineString(item))
             .filter(item => !item.description.toLowerCase().includes('quiz'))
-            // ✨ NEW: The 24-Hour Grace Period Filter ✨
             .filter(item => {
               const targetDate = parseSafeDate(item.deadline);
-              if (isNaN(targetDate)) return true; // Keep it if the date is weird, just to be safe
-              
-              // Calculate how many milliseconds have passed since the deadline
+              if (isNaN(targetDate)) return true; 
               const msPastDeadline = Date.now() - targetDate.getTime();
               const oneDayMs = 24 * 60 * 60 * 1000;
-              
-              // Only keep the task if it is LESS than 24 hours overdue
               return msPastDeadline < oneDayMs;
             });
+        }
 
-          if (structuredData.length > 0) {
-            // ✨ THE FIX: Prevents Hermes from crashing if a date is 'NaN' ✨
-            structuredData.sort((a, b) => {
-              const dateA = parseSafeDate(a.deadline);
-              const dateB = parseSafeDate(b.deadline);
-              const timeA = isNaN(dateA) ? 0 : dateA.getTime();
-              const timeB = isNaN(dateB) ? 0 : dateB.getTime();
-              return timeA - timeB;
-            });
-            setDeadlines(structuredData);
-            setStatus('Deadlines Synced'); 
-            structuredData.forEach(item => scheduleDeadlineReminder(item.subject, item.description, item.deadline));
-          } else { setDeadlines([]); setStatus('No actionable deadlines.'); }
-        } else { setStatus('No upcoming deadlines.'); }
+        const feelsDeadlines = normalizeFeelsDeadlines(structuredData);
+
+        await AsyncStorage.setItem(STORAGE_CACHED_FEELS, JSON.stringify(feelsDeadlines));
+
+        // 3. ✨ COMBINE SCRAPED DATA WITH CUSTOM DATA ✨
+        const combinedData = [...feelsDeadlines, ...customDeadlines];
+
+        // 4. Sort and display the combined list
+        if (combinedData.length > 0) {
+          combinedData.sort((a, b) => {
+            const dateA = parseSafeDate(a.deadline);
+            const dateB = parseSafeDate(b.deadline);
+            const timeA = isNaN(dateA) ? 0 : dateA.getTime();
+            const timeB = isNaN(dateB) ? 0 : dateB.getTime();
+            return timeA - timeB;
+          });
+          
+          setDeadlines(combinedData);
+          setStatus('Deadlines Synced'); 
+          combinedData.forEach(item => scheduleDeadlineReminder(item.subject, item.description, item.deadline));
+        } else { 
+          setDeadlines([]); 
+          setStatus('No actionable deadlines.'); 
+        }
       }
-    } catch (e) { setStatus('Error loading data.'); } finally { setRefreshing(false); }
+    } catch (e) { 
+      setStatus('Error loading data.'); 
+    } finally { 
+      setRefreshing(false); 
+    }
   };
 
   const renderRightActions = (progress, dragX, index) => {
@@ -311,6 +392,34 @@ const DashboardScreen = ({ onLogout }) => {
         </TouchableOpacity>
       </View>
     );
+  };
+
+  const upsertCustomDeadline = async (deadline) => {
+    try {
+      const savedStr = await AsyncStorage.getItem(STORAGE_CUSTOM_DEADLINES);
+      const existingDeadlines = normalizeCustomDeadlines(savedStr ? JSON.parse(savedStr) : []);
+      const exists = existingDeadlines.some((item) => item.id === deadline.id);
+      const updatedList = exists
+        ? existingDeadlines.map((item) => (item.id === deadline.id ? deadline : item))
+        : [...existingDeadlines, deadline];
+
+      await AsyncStorage.setItem(STORAGE_CUSTOM_DEADLINES, JSON.stringify(updatedList));
+      return updatedList;
+    } catch (error) {
+      console.error('Error saving custom deadline', error);
+      return null;
+    }
+  };
+
+  const removeCustomDeadline = async (deadlineId) => {
+    try {
+      const savedStr = await AsyncStorage.getItem(STORAGE_CUSTOM_DEADLINES);
+      const existingDeadlines = normalizeCustomDeadlines(savedStr ? JSON.parse(savedStr) : []);
+      const updatedList = existingDeadlines.filter((item) => item.id !== deadlineId);
+      await AsyncStorage.setItem(STORAGE_CUSTOM_DEADLINES, JSON.stringify(updatedList));
+    } catch (error) {
+      console.error('Error removing custom deadline', error);
+    }
   };
 
   if (!credentials) return <ActivityIndicator style={{ flex: 1 }} size="large" />;
@@ -509,7 +618,7 @@ const DashboardScreen = ({ onLogout }) => {
                 <TouchableOpacity style={styles.saveModalBtn} onPress={saveTemplates}><Text style={styles.saveModalBtnText}>Save</Text></TouchableOpacity>
               </View>
               <View style={styles.dangerZone}>
-                <TouchableOpacity onPress={onLogout} style={styles.logoutBtn}><Text style={styles.logoutBtnText}>Logout & Clear Vault</Text></TouchableOpacity>
+                <TouchableOpacity onPress={handleLogout} style={styles.logoutBtn}><Text style={styles.logoutBtnText}>Logout & Clear Vault</Text></TouchableOpacity>
               </View>
             </View>
           </View>
@@ -528,11 +637,11 @@ const DashboardScreen = ({ onLogout }) => {
             onMessage={handleMessage} 
             javaScriptEnabled={true}
 
-            incognito={true}
-            cacheEnabled={false}
-            sharedCookiesEnabled={false} 
+            incognito={false}
+            cacheEnabled={true}
+            sharedCookiesEnabled={true}
             thirdPartyCookiesEnabled={false}
-            domStorageEnabled={false}
+            domStorageEnabled={true}
           />
         </View>
       </GestureHandlerRootView>
