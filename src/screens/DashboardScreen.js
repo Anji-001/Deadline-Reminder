@@ -114,7 +114,27 @@ const DashboardScreen = ({ onLogout }) => {
       const creds = await Keychain.getGenericPassword();
       if (creds) { setCredentials(creds); setStatus('Connecting to FEeLS...'); } else { onLogout(); }
       
-      // ... (Keep your other AsyncStorage template getters here) ...
+      // Load saved templates and notes
+      try {
+        const [savedHeader, savedItem, savedOffset, savedDivider, savedNotes] = await Promise.all([
+          AsyncStorage.getItem('@header_template'),
+          AsyncStorage.getItem('@item_template'),
+          AsyncStorage.getItem('@reminder_offset'),
+          AsyncStorage.getItem('@divider_template'),
+          AsyncStorage.getItem('@saved_notes'),
+        ]);
+
+        if (savedHeader) setHeaderTemplate(savedHeader);
+        if (savedItem) setItemTemplate(savedItem);
+        if (savedOffset) setReminderOffset(savedOffset);
+        if (savedDivider) setDividerTemplate(savedDivider);
+        if (savedNotes) {
+          const parsedNotes = JSON.parse(savedNotes);
+          if (Array.isArray(parsedNotes)) setNotes(parsedNotes);
+        }
+      } catch (error) {
+        console.error('Failed to load settings or notes', error);
+      }
 
       // ✨ Load cached deadlines so the list isn't blank during sync ✨
       try {
