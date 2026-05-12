@@ -19,12 +19,14 @@ import {
   PlusIcon,
   ShareIcon,
   TrashIcon,
+  XCircleIcon,
 } from 'react-native-heroicons/outline';
 
 const DEFAULT_HEADER = "*UPCOMING DEADLINES:*";
 const DEFAULT_ITEM = "*[{subject}]* _{desc}_\n*Due:* {date}\n*Left:* {left}";
 const STORAGE_CUSTOM_DEADLINES = '@custom_deadlines';
 const STORAGE_CACHED_FEELS = '@cached_feels_deadlines';
+const DEADLINE_FILTERS = ['Assignments', 'Quizzes', 'Labs', 'Other'];
 
 const parseSafeDate = (dateString) => {
   let targetDate = new Date(dateString);
@@ -72,6 +74,14 @@ const getUrgencyStyle = (deadlineStr) => {
   return styles.cardSafe; 
 };
 
+const getDeadlineCategory = (item) => {
+  const text = `${item?.description || ''} ${item?.subject || ''}`.toLowerCase();
+  if (text.includes('quiz')) return 'Quizzes';
+  if (text.includes('lab')) return 'Labs';
+  if (text.includes('assignment') || text.includes('assgn') || text.includes('hw') || text.includes('homework')) return 'Assignments';
+  return 'Other';
+};
+
 const DashboardScreen = ({ onLogout }) => {
   const webviewRef = useRef(null);
   const [credentials, setCredentials] = useState(null);
@@ -80,6 +90,8 @@ const DashboardScreen = ({ onLogout }) => {
   // States
   const [deadlines, setDeadlines] = useState([]);
   const [notes, setNotes] = useState([]); // ✨ NEW: Notes Array
+  const [loginError, setLoginError] = useState(null);
+  const [successMessage, setSuccessMessage] = useState(null);
   
   const [refreshing, setRefreshing] = useState(false);
   const [reminderOffset, setReminderOffset] = useState('24');
@@ -87,6 +99,7 @@ const DashboardScreen = ({ onLogout }) => {
   const [headerTemplate, setHeaderTemplate] = useState(DEFAULT_HEADER);
   const [itemTemplate, setItemTemplate] = useState(DEFAULT_ITEM);
   const [lastDeleted, setLastDeleted] = useState(null);
+  const [deadlineFilters, setDeadlineFilters] = useState([]);
 
   const [dividerTemplate, setDividerTemplate] = useState('\n\n〰️〰️〰️〰️〰️〰️〰️〰️〰️\n\n');
 
@@ -164,9 +177,9 @@ const DashboardScreen = ({ onLogout }) => {
     await AsyncStorage.setItem('@item_template', itemTemplate);
     await AsyncStorage.setItem('@reminder_offset', reminderOffset);
     await AsyncStorage.setItem('@divider_template', dividerTemplate);
-    setShowSettings(false);
-    Alert.alert("Saved!", "Your settings have been saved.");
-    setShowSettings(false);
+    
+    setShowSettings(false); // Close the settings menu
+    setSuccessMessage("Your settings have been saved successfully!"); // ✨ Trigger custom modal
   };
 
   const handleLogout = async () => {
@@ -274,7 +287,11 @@ const DashboardScreen = ({ onLogout }) => {
 
   const handleShare = async () => {
     if (deadlines.length === 0) return;
-    const formattedItems = deadlines.map(d => itemTemplate.replace(/{subject}/g, d.subject).replace(/{desc}/g, d.description).replace(/{date}/g, d.deadline).replace(/{left}/g, d.remaining));
+    const filteredDeadlines = deadlines.filter((item) => (
+      deadlineFilters.length === 0 || deadlineFilters.includes(getDeadlineCategory(item))
+    ));
+    if (filteredDeadlines.length === 0) return;
+    const formattedItems = filteredDeadlines.map(d => itemTemplate.replace(/{subject}/g, d.subject).replace(/{desc}/g, d.description).replace(/{date}/g, d.deadline).replace(/{left}/g, d.remaining));
     const shareText = `${headerTemplate}\n\n${formattedItems.join(dividerTemplate)}`;
     try { await Share.share({ message: shareText }); } catch (error) {}
   };
@@ -341,12 +358,29 @@ const DashboardScreen = ({ onLogout }) => {
 
   const handleOpenAdd = () => { setEditingIndex(null); setNewSubject(''); setNewDesc(''); setCustomDate(new Date()); setShowAddModal(true); };
 
+  const toggleDeadlineFilter = (filter) => {
+    setDeadlineFilters((prev) => {
+      if (filter === 'All') return [];
+      const exists = prev.includes(filter);
+      const next = exists ? prev.filter((item) => item !== filter) : [...prev, filter];
+      if (next.length === DEADLINE_FILTERS.length) return [];
+      return next;
+    });
+  };
+
   const onRefresh = useCallback(() => { setRefreshing(true); setStatus('Refreshing FEeLS data...'); if (webviewRef.current) webviewRef.current.reload(); }, []);
 
   // ✨ NEW: Notice we added the 'async' keyword here! ✨
   const handleMessage = async (event) => {
     try {
       const parsed = JSON.parse(event.nativeEvent.data);
+      // ✨ NEW: Listen for the SOS message from the WebView
+      if (parsed.type === 'LOGIN_FAILED') {
+        setStatus('Login Failed!');
+        setLoginError(parsed.message);
+        return; // Stop processing anything else
+      }
+
       if (parsed.type === 'SCRAPED_DATA') {
         
         // 1. ✨ FETCH CUSTOM DEADLINES FROM STORAGE FIRST ✨
@@ -360,7 +394,6 @@ const DashboardScreen = ({ onLogout }) => {
         if (rawArray.length > 0) {
           structuredData = rawArray
             .map(item => parseDeadlineString(item))
-            .filter(item => !item.description.toLowerCase().includes('quiz'))
             .filter(item => {
               const targetDate = parseSafeDate(item.deadline);
               if (isNaN(targetDate)) return true; 
@@ -504,10 +537,47 @@ const DashboardScreen = ({ onLogout }) => {
           </View>
 
           <Text style={[styles.sectionTitle, {marginTop: 15, paddingHorizontal: 20}]}>Upcoming Deadlines</Text>
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={styles.filterRow}
+          >
+            <TouchableOpacity
+              onPress={() => toggleDeadlineFilter('All')}
+              style={[
+                styles.filterChip,
+                deadlineFilters.length === 0 && styles.filterChipActive,
+              ]}
+            >
+              <Text
+                style={[
+                  styles.filterText,
+                  deadlineFilters.length === 0 && styles.filterTextActive,
+                ]}
+              >
+                All
+              </Text>
+            </TouchableOpacity>
+            {DEADLINE_FILTERS.map((filter) => {
+              const isActive = deadlineFilters.includes(filter);
+              return (
+                <TouchableOpacity
+                  key={filter}
+                  onPress={() => toggleDeadlineFilter(filter)}
+                  style={[styles.filterChip, isActive && styles.filterChipActive]}
+                >
+                  <Text style={[styles.filterText, isActive && styles.filterTextActive]}>
+                    {filter}
+                  </Text>
+                </TouchableOpacity>
+              );
+            })}
+          </ScrollView>
 
           {/* DEADLINES LIST */}
           {deadlines.length > 0 ? (
             deadlines.map((item, index) => (
+              (deadlineFilters.length === 0 || deadlineFilters.includes(getDeadlineCategory(item))) ?
               <Reanimated.View key={item.subject + item.deadline} style={styles.cardWrapper} entering={FadeInDown.duration(200)} exiting={FadeOut.duration(150)} layout={LinearTransition.duration(200)}>
                 <Swipeable
                   ref={ref => { if (ref && !rowRefs.get(index)) { rowRefs.set(index, ref); } }}
@@ -533,6 +603,7 @@ const DashboardScreen = ({ onLogout }) => {
                   </View>
                 </Swipeable>
               </Reanimated.View>
+              : null
             ))
           ) : (
             <View style={styles.emptyState}>
@@ -654,13 +725,111 @@ const DashboardScreen = ({ onLogout }) => {
           </View>
         </Modal>
 
+        {/* --- ✨ NEW: CUSTOM LOGIN ERROR MODAL ✨ --- */}
+        <Modal visible={!!loginError} animationType="fade" transparent={true}>
+          <View style={[styles.modalOverlay, { justifyContent: 'center', alignItems: 'center', backgroundColor: 'rgba(0,0,0,0.6)' }]}>
+            <View style={[styles.modalContent, { width: '85%', borderRadius: 24, alignItems: 'center', padding: 30, paddingBottom: 30 }]}>
+              
+              <XCircleIcon size={64} color="#ef4444" style={{ marginBottom: 15 }} />
+              <Text style={[styles.modalTitle, { textAlign: 'center', marginBottom: 10, fontSize: 24 }]}>Login Failed</Text>
+              
+              <Text style={{ fontSize: 16, color: '#4b5563', textAlign: 'center', marginBottom: 25, lineHeight: 22 }}>
+                {loginError || "Your FEeLS username or password seems to be incorrect."}
+              </Text>
+              
+              <TouchableOpacity
+                style={{ 
+                  width: '100%', 
+                  backgroundColor: '#ef4444', 
+                  paddingVertical: 15, 
+                  borderRadius: 12, 
+                  alignItems: 'center',
+                  marginTop: 5
+                }}
+                onPress={() => {
+                  setLoginError(null);
+                  handleLogout(); // Kicks them back to the login screen
+                }}
+              >
+                <Text style={{ color: '#fff', fontWeight: 'bold', fontSize: 16 }}>
+                  Update Credentials
+                </Text>
+              </TouchableOpacity>
+
+            </View>
+          </View>
+        </Modal>
+
+        {/* --- ✨ NEW: CUSTOM SUCCESS MODAL ✨ --- */}
+        <Modal visible={!!successMessage} animationType="fade" transparent={true}>
+          <View style={[styles.modalOverlay, { justifyContent: 'center', alignItems: 'center', backgroundColor: 'rgba(0,0,0,0.6)' }]}>
+            <View style={[styles.modalContent, { width: '85%', borderRadius: 24, alignItems: 'center', padding: 30, paddingBottom: 30 }]}>
+              
+              {/* Green Success Icon */}
+              <CheckCircleIcon size={64} color="#10b981" style={{ marginBottom: 15 }} />
+              <Text style={[styles.modalTitle, { textAlign: 'center', marginBottom: 10, fontSize: 24 }]}>Saved!</Text>
+              
+              <Text style={{ fontSize: 16, color: '#4b5563', textAlign: 'center', marginBottom: 25, lineHeight: 22 }}>
+                {successMessage}
+              </Text>
+              
+              <TouchableOpacity
+                style={{ 
+                  width: '100%', 
+                  backgroundColor: '#10b981', // Matching green color
+                  paddingVertical: 15, 
+                  borderRadius: 12, 
+                  alignItems: 'center',
+                  marginTop: 5
+                }}
+                onPress={() => setSuccessMessage(null)} // Closes the modal
+              >
+                <Text style={{ color: '#fff', fontWeight: 'bold', fontSize: 16 }}>
+                  Awesome
+                </Text>
+              </TouchableOpacity>
+
+            </View>
+          </View>
+        </Modal>
+
         <View style={{ width: 0, height: 0, opacity: 0 }}>
           <WebView
             ref={webviewRef} source={{ uri: 'https://feels.pdn.ac.lk/calendar/view.php?view=upcoming' }}
             onNavigationStateChange={(navState) => {
               const url = navState.url;
               if (navState.loading) return; 
-              if (url.includes('login/index.php')) { setStatus('Logging in...'); webviewRef.current.injectJavaScript(`setTimeout(function(){var u=document.getElementById('username')||document.querySelector('input[name="username"]'),p=document.getElementById('password')||document.querySelector('input[name="password"]'),b=document.getElementById('loginbtn')||document.querySelector('button[type="submit"]')||document.querySelector('[type="submit"]');if(u&&p&&b){u.value='${credentials.username}';p.value='${credentials.password}';b.click();}else{window.ReactNativeWebView.postMessage(JSON.stringify({type:'ERROR',message:'HTML elements not found.'}));}},1000);true;`); } 
+              if (url.includes('login/index.php')) { 
+                setStatus('Logging in...'); 
+                webviewRef.current.injectJavaScript(`
+                  setTimeout(function() {
+                    // ✨ 1. Check if Moodle generated a red error alert
+                    var errorAlert = document.querySelector('.alert-danger, .error, #loginerrormessage');
+                    if (errorAlert && errorAlert.innerText.trim().length > 0) {
+                      // Tell React Native to stop and show the error!
+                      window.ReactNativeWebView.postMessage(JSON.stringify({
+                        type: 'LOGIN_FAILED', 
+                        message: errorAlert.innerText.trim()
+                      }));
+                      return; // Stop the script from trying to log in again
+                    }
+
+                    // ✨ 2. If no error, proceed with normal login
+                    var u = document.getElementById('username') || document.querySelector('input[name="username"]');
+                    var p = document.getElementById('password') || document.querySelector('input[name="password"]');
+                    var b = document.getElementById('loginbtn') || document.querySelector('button[type="submit"]') || document.querySelector('[type="submit"]');
+                    
+                    if (u && p && b) {
+                      u.value = '${credentials.username}';
+                      p.value = '${credentials.password}';
+                      b.click();
+                    } else {
+                      window.ReactNativeWebView.postMessage(JSON.stringify({type: 'ERROR', message: 'HTML elements not found.'}));
+                    }
+                  }, 1000);
+                  true;
+                `); 
+              }
               else if (url.includes('my/') || url.includes('dashboard') || url === 'https://feels.pdn.ac.lk/' || url === 'https://feels.pdn.ac.lk/?' || url.includes('?redirect=')) { setStatus('Routing to calendar...'); webviewRef.current.injectJavaScript(`window.location.href = 'https://feels.pdn.ac.lk/calendar/view.php?view=upcoming';`); }
               else if (url.includes('calendar/view.php')) { setStatus('Scanning FEeLS...'); webviewRef.current.injectJavaScript(`setTimeout(function(){try{var e=document.querySelectorAll('.event, .calendar_event_course'),r=[];e.forEach(function(ev){if(ev.parentElement&&ev.parentElement.closest('.event, .calendar_event_course'))return;var t=ev.innerText.replace(/\\n/g,' ').trim();if(t&&!r.includes(t))r.push(t);});window.ReactNativeWebView.postMessage(JSON.stringify({type:'SCRAPED_DATA',data:r}));}catch(er){window.ReactNativeWebView.postMessage(JSON.stringify({type:'ERROR',message:er.message}));}},1500);true;`); }
             }}
@@ -699,6 +868,12 @@ const styles = StyleSheet.create({
   noteTile: { width: 130, height: 130, backgroundColor: '#fff', borderRadius: 16, padding: 15, marginRight: 15, shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.05, shadowRadius: 5, elevation: 3 },
   noteTopic: { fontSize: 15, fontWeight: 'bold', color: '#1f2937', marginBottom: 6 },
   noteContentPreview: { fontSize: 13, color: '#6b7280', lineHeight: 18 },
+
+  filterRow: { paddingHorizontal: 20, paddingBottom: 10, gap: 8 },
+  filterChip: { paddingHorizontal: 12, paddingVertical: 6, borderRadius: 14, backgroundColor: '#f3f4f6', borderWidth: 1, borderColor: '#e5e7eb' },
+  filterChipActive: { backgroundColor: '#111827', borderColor: '#111827' },
+  filterText: { color: '#4b5563', fontSize: 12, fontWeight: '700' },
+  filterTextActive: { color: '#fff' },
 
   scrollPadding: { paddingBottom: 100 }, 
   emptyState: { alignItems: 'center', marginTop: 30 },
