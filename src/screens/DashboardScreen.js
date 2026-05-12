@@ -10,6 +10,7 @@ import { parseDeadlineString } from '../utils/parser';
 import { GestureHandlerRootView, Swipeable } from 'react-native-gesture-handler';
 import Reanimated, { FadeInDown, FadeOut, LinearTransition, ZoomIn } from 'react-native-reanimated';
 import BootSplash from "react-native-bootsplash";
+import Clipboard from '@react-native-clipboard/clipboard';
 import {
   ArchiveBoxIcon,
   CalendarDaysIcon,
@@ -20,6 +21,7 @@ import {
   ShareIcon,
   TrashIcon,
   XCircleIcon,
+  DocumentDuplicateIcon,
 } from 'react-native-heroicons/outline';
 
 const DEFAULT_HEADER = "*UPCOMING DEADLINES:*";
@@ -184,14 +186,31 @@ const DashboardScreen = ({ onLogout }) => {
 
   const handleLogout = async () => {
     try {
+      // 1. Clear FEeLS web cookies
       await CookieManager.clearAll(true);
       if (webviewRef.current?.clearCache) {
         webviewRef.current.clearCache(true);
       }
+
+      // 2. ✨ NEW: Destroy all scheduled Android notifications! ✨
+      await notifee.cancelAllNotifications();
+
+      // 3. ✨ NEW: Shred the cached deadlines from the phone's hard drive ✨
+      await AsyncStorage.removeItem(STORAGE_CUSTOM_DEADLINES);
+      await AsyncStorage.removeItem(STORAGE_CACHED_FEELS);
+      
+      // Note: We are deliberately leaving settings (like header formats) and Quick Notes intact, 
+      // but if you want to wipe notes too, just uncomment the line below:
+      // await AsyncStorage.removeItem('@saved_notes');
+
+      // 4. Clear the screen memory so it doesn't flash old data on the next login
+      setDeadlines([]);
+
     } catch (error) {
-      console.warn('Failed to clear FEeLS cookies', error);
+      console.warn('Failed to completely clear user data', error);
     }
 
+    // 5. Fire the App.js logout to lock the vault
     onLogout();
   };
 
@@ -231,6 +250,16 @@ const DashboardScreen = ({ onLogout }) => {
     setNotes(updatedNotes);
     await AsyncStorage.setItem('@saved_notes', JSON.stringify(updatedNotes));
     setShowNoteModal(false);
+  };
+
+  const handleCopyNote = () => {
+    // Combines the topic and content with a line break
+    const textToCopy = `*${noteTopic}*\n\n${noteContent}`;
+    Clipboard.setString(textToCopy);
+    
+    // Uses the custom green modal we just built!
+    setShowNoteModal(false); 
+    setSuccessMessage("Note copied to clipboard!"); 
   };
 
   // --- Task Logic (Unchanged) ---
@@ -636,11 +665,20 @@ const DashboardScreen = ({ onLogout }) => {
             <View style={[styles.modalContent, { height: '80%' }]}> 
               <View style={styles.noteModalHeader}>
                 <Text style={styles.modalTitle}>{editingNoteId ? 'Edit Note' : 'New Note'}</Text>
-                {editingNoteId && (
-                  <TouchableOpacity onPress={handleDeleteNote} style={styles.trashBtn}>
-                    <TrashIcon size={20} color="#111827" />
-                  </TouchableOpacity>
-                )}
+                
+                {/* ✨ NEW: Grouping the buttons together */}
+                <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                  {editingNoteId && (
+                    <TouchableOpacity onPress={handleCopyNote} style={[styles.trashBtn, { marginRight: 15 }]}>
+                      <DocumentDuplicateIcon size={22} color="#4b5563" />
+                    </TouchableOpacity>
+                  )}
+                  {editingNoteId && (
+                    <TouchableOpacity onPress={handleDeleteNote} style={styles.trashBtn}>
+                      <TrashIcon size={22} color="#ef4444" />
+                    </TouchableOpacity>
+                  )}
+                </View>
               </View>
 
               <TextInput 
